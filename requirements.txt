@@ -1,0 +1,5 @@
+streamlit
+haystack-ai
+openai
+pypdf
+python-docx
