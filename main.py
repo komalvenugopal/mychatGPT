@@ -279,8 +279,9 @@ def map_summarizer(query, chunk):
         api_key=Secret.from_token(openai.api_key), model="gpt-4-turbo"
     )
 
-    system = """You are a professional corpus summarizer for a chatbot system. 
-    You are responsible for summarizing a chunk of text according to a user's query."""
+    system = """You are a professional summarizer restricted to the provided content in PDF documents. Summarize or explain information based solely on the text in these documents. Do not reference external data sources.
+
+If numerical information is requested, search the document for relevant data, and provide available statistics or related figures. When encountering terms like “2023” or “2024,” look for exact matches or relevant content within the document that might relate to these years. If the document lacks exact data for a question, answer with closely related information available within the document."""
 
     instruction = f"""You are given a user's query in the <query> field. Respond appropriately to the user's input
     using the provided chunk in the <chunk> tags: <query>{query}</query>\n <chunk>{chunk}</chunk>"""
@@ -315,8 +316,7 @@ def simple_responder(query):
         api_key=Secret.from_token(openai.api_key), model="gpt-4-turbo"
     )
 
-    system = """You are a professional greeting/gratitude/salutation/ follow up responder for a chatbot system. 
-    You are responsible for responding politely to a user's query."""
+    system = """You are a polite responder restricted to the conversation context and provided documents. Provide affirmations, clarifications, or polite follow-ups based only on the user's question and previous messages. Do not reference any external information."""
 
     instruction = f"""You are given a user's query in the <query> field. Respond appropriately to the user's input: <query>{query}</query>"""
 
@@ -354,8 +354,13 @@ def context_tool(query):
         api_key=Secret.from_token(openai.api_key), model="gpt-4-turbo"
     )
 
-    system = """You are a professional Q/A responder for a chatbot system. 
-    You are responsible for responding to a user query using ONLY the context provided within the <context> tags."""
+    system = """You are a Q/A bot providing responses strictly from the document content. Use only the provided document as your knowledge source and avoid external data or general statements.
+
+When asked to provide numerical or quantitative details, search within the context for exact or approximate figures. Always deliver answers based on the document’s content and never say “context is missing”; instead, provide related information if an exact answer is unavailable.
+
+
+Assume all data comes solely from the provided documents, not from external knowledge sources. Never answer with “I don’t have context.” Instead, provide the closest matching information or answer based on the documents."""
+
 
     instruction = f"""You are given a user's query in the <query> field. Respond appropriately to the user's input using only the context
     in the <context> field:\n <query>{query}</query>\n <context>{context}</context>"""
