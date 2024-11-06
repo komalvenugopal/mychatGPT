@@ -30,10 +30,16 @@ redis = Redis(url="https://brave-ferret-25499.upstash.io", token="AWObAAIjcDFjYm
 
 
 class RAGAgent:
-    """Modified RAG Agent to work with message queue"""
+    """RAG Agent with RabbitMQ integration"""
     def __init__(self, host='localhost'):
+        # Initialize RabbitMQ connection
         self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
         self.channel = self.connection.channel()
+        
+        # Declare queues
+        self.channel.queue_declare(queue='input_queue')
+        
+        # Set up callback queue for RPC-style communication
         result = self.channel.queue_declare(queue='', exclusive=True)
         self.callback_queue = result.method.queue
         
@@ -42,58 +48,120 @@ class RAGAgent:
             on_message_callback=self.on_response,
             auto_ack=True
         )
+        
         self.response = None
-        self.correlation_id = None
-                        
+        self.corr_id = None
+        
     def on_response(self, ch, method, props, body):
-        if self.correlation_id == props.correlation_id:
-            self.response = body
+        """Callback when response is received"""
+        if self.corr_id == props.correlation_id:
+            self.response = json.loads(body)
 
     def invoke_agent(self, query: str, file) -> str:
-        if "session_id" not in st.session_state:
-            st.session_state.session_id = str(uuid.uuid4())
-            
-        # Get intent
-        intent = query_router(query)["replies"][0].content.strip()
-        
-        message = {
-            'session_id': st.session_state.session_id,
-            'query': query,
-            'file_path': os.path.join("uploads", file.name) if file else None,
-            'conversation_history': st.session_state.messages
-        }
-        self.response = None
-        self.correlation_id = str(uuid.uuid4())
-        self.channel.basic_publish(
-            exchange='',
-            routing_key='input_queue',
-            properties=pika.BasicProperties(
-                reply_to=self.callback_queue,
-                correlation_id=self.correlation_id,
-            ),
-            body=json.dumps(message)
-        )
-                
-        # Publish message and wait for response
         try:
-            self.queue.publish_message(message)
-            response = self.queue.get_response(st.session_state.session_id)
+            # Generate unique correlation ID
+            self.corr_id = str(uuid.uuid4())
             
-            if response is None:
-                return "Request timed out. Please try again."
-            elif "error" in response:
-                return f"Error processing request: {response['error']}"
-            else:
-                return response["response"]
-                
+            # Get intent
+            intent = query_router(query)["replies"][0].content.strip()
+            
+            # Prepare message
+            message = {
+                'query': query,
+                'file_path': os.path.join("uploads", file.name) if file else None,
+                'intent': intent,
+                'conversation_history': st.session_state.messages
+            }
+            
+            # Publish message
+            self.response = None
+            self.channel.basic_publish(
+                exchange='',
+                routing_key='input_queue',
+                properties=pika.BasicProperties(
+                    reply_to=self.callback_queue,
+                    correlation_id=self.corr_id,
+                ),
+                body=json.dumps(message)
+            )
+            
+            # Wait for response with timeout
+            timeout = 30  # 30 seconds
+            start_time = time.time()
+            while self.response is None:
+                self.connection.process_data_events()
+                if time.time() - start_time > timeout:
+                    return "Request timed out. Please try again."
+                time.sleep(0.1)
+            
+            # Process the response based on intent
+            if intent == "(1)":
+                st.success("Retrieving Summary...")
+                return summary_tool(query, file)["replies"][0].content
+            elif intent == "(2)":
+                st.success("Retrieving Context...")
+                return context_tool(query)["replies"][0].content
+            elif intent == "(3)":
+                st.success("Retrieving Simple Response...")
+                return simple_responder(query)["replies"][0].content
+            
         except Exception as e:
             return f"Error: {str(e)}"
         
     def __del__(self):
-        self.queue.close()
+        """Cleanup when object is destroyed"""
+        if hasattr(self, 'connection') and self.connection.is_open:
+            self.connection.close()
 
 
-
+def message_processor():
+    """Background worker to process messages from RabbitMQ"""
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    channel = connection.channel()
+    channel.queue_declare(queue='input_queue')
+    
+    def callback(ch, method, props, body):
+        try:
+            # Parse message
+            message = json.loads(body)
+            query = message['query']
+            file_path = message['file_path']
+            intent = message['intent']
+            
+            # Process based on intent
+            response = None
+            if intent == "(1)":
+                response = summary_tool(query, file_path)["replies"][0].content
+            elif intent == "(2)":
+                response = context_tool(query)["replies"][0].content
+            elif intent == "(3)":
+                response = simple_responder(query)["replies"][0].content
+            
+            # Send response back
+            ch.basic_publish(
+                exchange='',
+                routing_key=props.reply_to,
+                properties=pika.BasicProperties(correlation_id=props.correlation_id),
+                body=json.dumps({"response": response})
+            )
+            
+        except Exception as e:
+            # Send error response
+            ch.basic_publish(
+                exchange='',
+                routing_key=props.reply_to,
+                properties=pika.BasicProperties(correlation_id=props.correlation_id),
+                body=json.dumps({"error": str(e)})
+            )
+        
+        finally:
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+    
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue='input_queue', on_message_callback=callback)
+    print("Message processor started. Waiting for messages...")
+    channel.start_consuming()
+    
 @st.cache_resource()
 def get_doc_store():
     """Get the document store for indexing and retrieval."""
@@ -348,7 +416,10 @@ if __name__ == "__main__":
     clear_button = st.sidebar.button(
         "Clear Conversation", key="clear", on_click=clear_convo
     )
-
+    if st.sidebar.checkbox("Enable Background Processing"):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(message_processor)
+    
     file = st.file_uploader("Choose a file to index...", type=["docx", "pdf", "txt"])
     clicked = st.button("Upload File", key="Upload")
     if file and clicked:
